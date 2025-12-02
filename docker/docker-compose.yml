@@ -1,0 +1,250 @@
+# =============================================================================
+# Yeirin Backend - Docker Compose (Base Configuration)
+# =============================================================================
+#
+# MSA 서비스 구성:
+# - nginx: 리버스 프록시 + SSL 종료
+# - api-gateway: Yeirin API (NestJS) - Port 3000
+# - yeirin-ai: AI 추천 서비스 (FastAPI) - Port 8001
+# - soul-e: LLM 심리상담 챗봇 (FastAPI) - Port 8000
+# - postgres: PostgreSQL 데이터베이스
+# - redis: 캐시 및 세션 저장소
+#
+# 사용법:
+# - 개발: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+# - 운영: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# =============================================================================
+
+version: "3.8"
+
+services:
+  # ===========================================================================
+  # Nginx Reverse Proxy
+  # ===========================================================================
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: yeirin-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - nginx-logs:/var/log/nginx
+      # Let's Encrypt 인증서 (Certbot)
+      - certbot-conf:/etc/letsencrypt:ro
+      - certbot-www:/var/www/certbot:ro
+    depends_on:
+      - api-gateway
+      - yeirin-ai
+      - soul-e
+    networks:
+      - yeirin-network
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===========================================================================
+  # Certbot (Let's Encrypt SSL)
+  # ===========================================================================
+  certbot:
+    image: certbot/certbot:latest
+    container_name: yeirin-certbot
+    volumes:
+      - certbot-conf:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    # SSL 인증서 갱신 (크론잡으로 실행)
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+
+  # ===========================================================================
+  # Yeirin API Gateway (NestJS)
+  # ===========================================================================
+  api-gateway:
+    image: ${ECR_REGISTRY:-local}/yeirin/api-gateway:${IMAGE_TAG:-latest}
+    container_name: yeirin-api-gateway
+    restart: unless-stopped
+    expose:
+      - "3000"
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - PORT=3000
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_NAME=${DATABASE_NAME:-yeirin}
+      - DATABASE_USER=${DATABASE_USER:-yeirin}
+      - DATABASE_PASSWORD=${DATABASE_PASSWORD}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_EXPIRES_IN=${JWT_EXPIRES_IN:-15m}
+      - JWT_REFRESH_EXPIRES_IN=${JWT_REFRESH_EXPIRES_IN:-7d}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - yeirin-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ===========================================================================
+  # Yeirin AI Service (FastAPI)
+  # ===========================================================================
+  yeirin-ai:
+    image: ${ECR_REGISTRY:-local}/yeirin/yeirin-ai:${IMAGE_TAG:-latest}
+    container_name: yeirin-ai
+    restart: unless-stopped
+    expose:
+      - "8001"
+    environment:
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - PORT=8001
+      - DATABASE_URL=postgresql://${DATABASE_USER:-yeirin}:${DATABASE_PASSWORD}@postgres:5432/${DATABASE_NAME:-yeirin}
+      - REDIS_URL=redis://redis:6379
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - YEIRIN_BACKEND_URL=http://api-gateway:3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - yeirin-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ===========================================================================
+  # Soul-E LLM Service (FastAPI)
+  # ===========================================================================
+  soul-e:
+    image: ${ECR_REGISTRY:-local}/yeirin/soul-e:${IMAGE_TAG:-latest}
+    container_name: yeirin-soul-e
+    restart: unless-stopped
+    expose:
+      - "8000"
+    environment:
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - PORT=8000
+      - DATABASE_URL=postgresql://${DATABASE_USER:-yeirin}:${DATABASE_PASSWORD}@postgres:5432/${DATABASE_NAME:-yeirin}
+      - REDIS_URL=redis://redis:6379
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - YEIRIN_BACKEND_URL=http://api-gateway:3000
+      - INPSYT_API_KEY=${INPSYT_API_KEY}
+      - JWT_SECRET=${JWT_SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - yeirin-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ===========================================================================
+  # PostgreSQL Database
+  # ===========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: yeirin-postgres
+    restart: unless-stopped
+    expose:
+      - "5432"
+    environment:
+      - POSTGRES_DB=${DATABASE_NAME:-yeirin}
+      - POSTGRES_USER=${DATABASE_USER:-yeirin}
+      - POSTGRES_PASSWORD=${DATABASE_PASSWORD}
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - yeirin-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER:-yeirin} -d ${DATABASE_NAME:-yeirin}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ===========================================================================
+  # Redis Cache
+  # ===========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: yeirin-redis
+    restart: unless-stopped
+    expose:
+      - "6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - yeirin-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  yeirin-network:
+    driver: bridge
+    name: yeirin-network
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  postgres-data:
+    name: yeirin-postgres-data
+  redis-data:
+    name: yeirin-redis-data
+  nginx-logs:
+    name: yeirin-nginx-logs
+  certbot-conf:
+    name: yeirin-certbot-conf
+  certbot-www:
+    name: yeirin-certbot-www

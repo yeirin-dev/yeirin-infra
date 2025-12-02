@@ -1,0 +1,138 @@
+# =============================================================================
+# Yeirin Backend - Docker Compose (Production Override)
+# =============================================================================
+#
+# 프로덕션 환경 설정:
+# - ECR에서 이미지 풀
+# - 리소스 제한 설정
+# - 프로덕션 로깅
+# - 헬스체크 강화
+#
+# 사용법:
+# docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# =============================================================================
+
+version: "3.8"
+
+services:
+  # ===========================================================================
+  # Nginx - 프로덕션 환경 설정
+  # ===========================================================================
+  nginx:
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+
+  # ===========================================================================
+  # API Gateway - 프로덕션 환경 설정
+  # ===========================================================================
+  api-gateway:
+    restart: always
+    environment:
+      - NODE_ENV=production
+      - LOG_LEVEL=info
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    healthcheck:
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  # ===========================================================================
+  # Yeirin AI - 프로덕션 환경 설정
+  # ===========================================================================
+  yeirin-ai:
+    restart: always
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    healthcheck:
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  # ===========================================================================
+  # Soul-E - 프로덕션 환경 설정
+  # ===========================================================================
+  soul-e:
+    restart: always
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 768M # LLM 서비스는 메모리 더 필요
+        reservations:
+          cpus: "0.25"
+          memory: 384M
+    healthcheck:
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  # ===========================================================================
+  # PostgreSQL - 프로덕션 환경 설정
+  # ===========================================================================
+  postgres:
+    restart: always
+    environment:
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    # 데이터베이스 백업 볼륨 (추가)
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - postgres-backup:/backup
+
+  # ===========================================================================
+  # Redis - 프로덕션 환경 설정
+  # ===========================================================================
+  redis:
+    restart: always
+    command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy allkeys-lru
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+
+# =============================================================================
+# Additional Production Volumes
+# =============================================================================
+volumes:
+  postgres-backup:
+    name: yeirin-postgres-backup
